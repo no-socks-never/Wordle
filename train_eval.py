@@ -69,57 +69,26 @@ def avg_to_label(avg_tries, thresholds=None):
 # ==================== 画图工具（支持自定义 result_dir） ====================
 
 def plot_loss_curve(history: Dict[str, list], model_name: str, result_dir: str):
-    """保存 history 为 CSV，并画 train/val loss 曲线。"""
+    """只保存 history 为 CSV，不再画 loss 曲线图。"""
     df = pd.DataFrame(history)
     csv_path = os.path.join(result_dir, f"{model_name}_history.csv")
     df.to_csv(csv_path, index=False)
-
-    plt.figure()
-    plt.plot(df["epoch"], df["train_loss"], label="train_loss")
-    plt.plot(df["epoch"], df["val_loss"], label="val_loss")
-
-    plt.xlabel("Epoch")
-    plt.ylabel("MSE Loss")
-    plt.title(f"Loss Curve - {model_name}")
-    plt.legend()
-    plt.tight_layout()
-    fig_path = os.path.join(result_dir, f"{model_name}_loss_curve.png")
-    plt.savefig(fig_path)
-    plt.close()
-
+    # 不再绘制和保存 png 图
 
 def plot_avg_trend(true_avg, pred_avg, model_name: str, result_dir: str, split_tag: str = "test"):
-    """画 avg_tries 的真实/预测折线趋势图。"""
-    true_avg = np.asarray(true_avg, dtype=float)
-    pred_avg = np.asarray(pred_avg, dtype=float)
-    n = len(true_avg)
-    x = np.arange(n)
-    plt.figure()
-    plt.plot(x, true_avg, label="true_avg")
-    plt.plot(x, pred_avg, label="pred_avg")
-    plt.xlabel("Sample index (time order)")
-    plt.ylabel("Average Tries")
-    plt.title(f"Avg Tries Trend ({split_tag}) - {model_name}")
-    plt.legend()
-    plt.tight_layout()
-    fig_path = os.path.join(result_dir, f"{model_name}_{split_tag}_avg_trend.png")
-    plt.savefig(fig_path)
-    plt.close()
-
+    """
+    （已禁用）原本用于画 avg_tries 趋势图。
+    现在不再生成图片，保留空函数以兼容调用。
+    """
+    return
 
 def plot_attention_heatmap(att_weights, model_name: str, result_dir: str):
-    """对 BiLSTM 模型 attention 画热力图。"""
-    w = np.asarray(att_weights).reshape(1, -1)
-    plt.figure()
-    plt.imshow(w, aspect="auto")
-    plt.colorbar()
-    plt.xlabel("Time step")
-    plt.ylabel("Attention")
-    plt.title(f"Attention Heatmap - {model_name}")
-    plt.tight_layout()
-    fig_path = os.path.join(result_dir, f"{model_name}_attention_heatmap.png")
-    plt.savefig(fig_path)
-    plt.close()
+    """
+    （已禁用）原本用于画 BiLSTM 的 attention 热力图。
+    现在不再生成图片，保留空函数以兼容调用。
+    """
+    return
+
 
 
 # ==================== 训练 & 评估 ====================
@@ -170,25 +139,33 @@ def evaluate(
     all_true_succ = []
     all_pred_succ = []
 
+    # 新增：分布层面的误差
+    all_dist_l1 = []   # 每天的 sum_j |p_j - p_hat_j|
+    all_dist_kl = []   # 每天的 KL(p || p_hat)
+
+    eps = 1e-8
+
     for batch in loader:
         word_seq = batch["word_seq"].to(device)
         num_seq = batch["num_seq"].to(device)
-        target_dist = batch["target_dist"].to(device)
-        target_avg = batch["target_avg"].to(device)    # [B,1]
-        target_succ = batch["target_succ"].to(device)  # [B,1]
+        target_dist = batch["target_dist"].to(device)      # [B,7]
+        target_avg = batch["target_avg"].to(device)        # [B,1]
+        target_succ = batch["target_succ"].to(device)      # [B,1]
 
         outputs = model(word_seq, num_seq)
         if isinstance(outputs, tuple):
             pred_dist, _ = outputs
         else:
-            pred_dist = outputs
+            pred_dist = outputs                            # [B,7] 概率分布
 
+        # 训练时同一个 loss：分布的 MSE
         loss = criterion(pred_dist, target_dist)
 
         batch_size = word_seq.size(0)
         total_loss += loss.item() * batch_size
         n_samples += batch_size
 
+        # 标量：平均尝试次数和成功率
         avg_pred, succ_pred = dist_to_avg_succ(pred_dist)
 
         all_true_avg.append(target_avg.cpu().numpy())      # [B,1]
@@ -196,12 +173,26 @@ def evaluate(
         all_true_succ.append(target_succ.cpu().numpy())    # [B,1]
         all_pred_succ.append(succ_pred.cpu().numpy())      # [B]
 
+        # 新增：分布层误差
+        # L1：sum_j |p_j - p_hat_j|
+        dist_l1_batch = torch.abs(pred_dist - target_dist).sum(dim=1)   # [B]
+        all_dist_l1.append(dist_l1_batch.detach().cpu().numpy())
+
+        # KL：sum_j p_j * log(p_j / p_hat_j)
+        kl_batch = (target_dist * (
+            (target_dist + eps).log() - (pred_dist + eps).log()
+        )).sum(dim=1)                                     # [B]
+        all_dist_kl.append(kl_batch.detach().cpu().numpy())
+
     total_loss /= max(n_samples, 1)
 
     true_avg = np.concatenate(all_true_avg, axis=0).squeeze(-1)
     pred_avg = np.concatenate(all_pred_avg, axis=0)
     true_succ = np.concatenate(all_true_succ, axis=0).squeeze(-1)
     pred_succ = np.concatenate(all_pred_succ, axis=0)
+
+    dist_l1 = np.concatenate(all_dist_l1, axis=0)
+    dist_kl = np.concatenate(all_dist_kl, axis=0)
 
     # 分类指标：基于 avg_tries 做三档分桶
     true_labels = avg_to_label(true_avg, thresholds=thresholds)
@@ -223,6 +214,9 @@ def evaluate(
         "rmse_succ": rmse_succ,
         "acc": float(acc),
         "macro_f1": float(macro_f1),
+        # 新增：分布层指标
+        "dist_l1": float(dist_l1.mean()),
+        "dist_kl": float(dist_kl.mean()),
     }
 
     details = {
@@ -232,9 +226,12 @@ def evaluate(
         "pred_succ": pred_succ,
         "true_labels": true_labels,
         "pred_labels": pred_labels,
+        "dist_l1": dist_l1,
+        "dist_kl": dist_kl,
     }
 
     return metrics, details
+
 
 
 def train_one_model(
