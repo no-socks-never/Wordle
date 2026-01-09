@@ -1,0 +1,5 @@
+Model,Best_Config,Test_MAE_Avg,Test_L1_Dist,Test_EMD
+LSTM,seq0_h128_modeC,0.2646,0.2485,0.3047
+BiLSTM,seq0_h128_modeC,0.2776,0.2496,0.3075
+Transformer,seq0_h64_modeB,0.2618,0.2198,0.2731
+Baseline (Global Mean),N/A,0.3268,0.2780,N/A

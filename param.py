@@ -1,364 +1,101 @@
 # param.py
 """
-超参数搜索脚本：
-- LSTM / BiLSTM / Transformer 三个模型
-- 每个模型对应 results/{LSTM,BiLSTM,Transformer} 子文件夹
-- LSTM：默认对 feature_mode ∈ {"A","B","C"} 做网格搜索
-- BiLSTM / Transformer：默认只用 feature_mode="C"（你可以按需扩展）
+超参数搜索与消融实验主控脚本：
+- 移除 config.py 依赖
+- 执行 LSTM / BiLSTM / Transformer 的网格搜索
+- 自动计算 Global Mean Baseline
+- 支持消融实验 (SEQ_LEN=0)
 """
 
 import os
-from itertools import product
-
 import pandas as pd
 import torch
+from itertools import product
+from tqdm import tqdm
 
-from config import (
-    WORD_EMB_DIM,
-    RESULT_DIR,
-    NUM_EPOCHS,
-)
-# param.py 里 import 后面加一段统一搜索空间
-GRID_SEQ_LEN = [10, 14]               # 统一：10 日 & 14 日历史窗口
-GRID_HIDDEN = [64, 128]           # 统一：小/中/大 三种隐层维度
-GRID_LR = [1e-3, 5e-4]          # 统一：含一个稍小学习率
-GRID_FEATURE_MODE = ["A", "B", "C"]   # 统一：三种特征模式全部搜索
-
-
-from data_prepare import prepare_datasets
+# 引入我们重构后的模块
+from data_prepare import prepare_datasets, RESULT_DIR
 from models import BaseLSTMModel, BiLSTMAttentionModel, TransformerTimeModel
-from train_eval import train_one_model
+from train_eval import train_one_model, get_global_mean_baseline
 
-os.makedirs(RESULT_DIR, exist_ok=True)
+# ===== 实验配置 (替代原 config.py) =====
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+GRID_SEQ_LEN = [0, 10,14]            # 0: 消融实验（无历史）；14: 完整实验
+GRID_HIDDEN = [64, 128]
+GRID_LR = [1e-3, 5e-4]
+GRID_FEATURE_MODE = ["A", "B", "C"]
+NUM_EPOCHS = 50
 
+# ==================== 自动化搜索逻辑 ====================
 
-def sweep_lstm():
-    """
-    LSTM 模型的超参数搜索：
-      - seq_len
-      - hidden_dim
-      - lr
-      - feature_mode ("A","B","C")
-    结果保存到 results/LSTM/hparam_results_LSTM.csv
-    """
-    subdir = "LSTM"
-    result_subdir = os.path.join(RESULT_DIR, subdir)
-    os.makedirs(result_subdir, exist_ok=True)
-
-    # 统一的搜索空间
-    seq_len_list = GRID_SEQ_LEN
-    hidden_list = GRID_HIDDEN
-    lr_list = GRID_LR
-    feature_mode_list = GRID_FEATURE_MODE
-
+def run_sweep(model_type="Transformer"):
+    print(f"\n>>> 开始 {model_type} 模型的超参数搜索与消融实验...")
     records = []
-
-    for seq_len, hidden_dim, lr, feature_mode in product(
-        seq_len_list, hidden_list, lr_list, feature_mode_list
-    ):
-        print("\n================ LSTM CONFIG ================")
-        print(f"seq_len={seq_len}, hidden_dim={hidden_dim}, lr={lr}, feature_mode={feature_mode}")
-
-        info, dataset, loaders = prepare_datasets(
-            seq_len=seq_len,
-            feature_mode=feature_mode,
-            save_npz=False,
+    
+    # 组合搜索空间
+    search_space = list(product(GRID_SEQ_LEN, GRID_HIDDEN, GRID_LR, GRID_FEATURE_MODE))
+    
+    for seq_len, hidden_dim, lr, feat_mode in tqdm(search_space):
+        # 1. 准备数据
+        info, _, (train_loader, val_loader, test_loader) = prepare_datasets(
+            seq_len=seq_len, 
+            feature_mode=feat_mode
         )
-        train_loader, val_loader, test_loader = loaders
-
+        
+        # 2. 构造模型
         vocab_size = info["vocab_size"]
-        num_numeric_features = info["num_numeric_features"]
-        thresholds = info["difficulty_thresholds"]
-
-        model = BaseLSTMModel(
-            vocab_size=vocab_size,
-            num_numeric_features=num_numeric_features,
-            word_emb_dim=WORD_EMB_DIM,
-            hidden_dim=hidden_dim,
-        )
-
-        model_name = f"LSTM_seq{seq_len}_h{hidden_dim}_lr{lr}_feat{feature_mode}"
+        num_numeric = info["num_numeric_features"]
+        
+        if model_type == "LSTM":
+            model = BaseLSTMModel(vocab_size, num_numeric, hidden_dim=hidden_dim)
+        elif model_type == "BiLSTM":
+            model = BiLSTMAttentionModel(vocab_size, num_numeric, hidden_dim=hidden_dim)
+        else: # Transformer
+            model = TransformerTimeModel(vocab_size, num_numeric, d_model=hidden_dim)
+            
+        # 3. 训练并评估
+        model_id = f"{model_type}_seq{seq_len}_h{hidden_dim}_lr{lr}_mode{feat_mode}"
         best_val_loss, test_metrics = train_one_model(
-            model,
-            train_loader,
-            val_loader,
-            test_loader,
-            model_name=model_name,
-            lr=lr,
-            thresholds=thresholds,
-            result_subdir=subdir,
-            return_val=True,
+            model, train_loader, val_loader, test_loader, 
+            model_name=model_id, lr=lr, epochs=NUM_EPOCHS, device=DEVICE
         )
-
-        record = {
-            "model": "LSTM",
+        
+        # 4. 记录结果
+        res = {
+            "model_type": model_type,
             "seq_len": seq_len,
             "hidden_dim": hidden_dim,
             "lr": lr,
-            "feature_mode": feature_mode,
-            "best_val_loss": best_val_loss,
+            "feature_mode": feat_mode,
+            "best_val_loss": best_val_loss
         }
-        record.update({f"test_{k}": v for k, v in test_metrics.items()})
-        records.append(record)
-
+        res.update({f"test_{k}": v for k, v in test_metrics.items()})
+        records.append(res)
+        
+    # 保存结果（格式与原代码一致，确保不破坏同学画图的代码）
     df = pd.DataFrame(records)
-    out_path = os.path.join(result_subdir, "hparam_results_LSTM.csv")
+    out_path = os.path.join(RESULT_DIR, f"hparam_results_{model_type}.csv")
     df.to_csv(out_path, index=False)
-    print(f"[LSTM] 全部结果已保存到 {out_path}")
     return df
 
-
-def sweep_bilstm():
-    """
-    BiLSTM + Attention 的超参数搜索：
-      - seq_len
-      - hidden_dim
-      - lr
-      - feature_mode ("A","B","C")
-    结果保存到 results/BiLSTM/hparam_results_BiLSTM.csv
-    """
-    subdir = "BiLSTM"
-    result_subdir = os.path.join(RESULT_DIR, subdir)
-    os.makedirs(result_subdir, exist_ok=True)
-
-    # 统一的搜索空间
-    seq_len_list = GRID_SEQ_LEN
-    hidden_list = GRID_HIDDEN
-    lr_list = GRID_LR
-    feature_mode_list = GRID_FEATURE_MODE
-
-    records = []
-
-    for seq_len, hidden_dim, lr, feature_mode in product(
-        seq_len_list, hidden_list, lr_list, feature_mode_list
-    ):
-        print("\n================ BiLSTM CONFIG ================")
-        print(f"seq_len={seq_len}, hidden_dim={hidden_dim}, lr={lr}, feature_mode={feature_mode}")
-
-        info, dataset, loaders = prepare_datasets(
-            seq_len=seq_len,
-            feature_mode=feature_mode,
-            save_npz=False,
-        )
-        train_loader, val_loader, test_loader = loaders
-
-        vocab_size = info["vocab_size"]
-        num_numeric_features = info["num_numeric_features"]
-        thresholds = info["difficulty_thresholds"]
-
-        model = BiLSTMAttentionModel(
-            vocab_size=vocab_size,
-            num_numeric_features=num_numeric_features,
-            word_emb_dim=WORD_EMB_DIM,
-            hidden_dim=hidden_dim,
-        )
-
-        model_name = f"BiLSTM_seq{seq_len}_h{hidden_dim}_lr{lr}_feat{feature_mode}"
-        best_val_loss, test_metrics = train_one_model(
-            model,
-            train_loader,
-            val_loader,
-            test_loader,
-            model_name=model_name,
-            lr=lr,
-            thresholds=thresholds,
-            result_subdir=subdir,
-            return_val=True,
-        )
-
-        record = {
-            "model": "BiLSTM",
-            "seq_len": seq_len,
-            "hidden_dim": hidden_dim,
-            "lr": lr,
-            "feature_mode": feature_mode,
-            "best_val_loss": best_val_loss,
-        }
-        record.update({f"test_{k}": v for k, v in test_metrics.items()})
-        records.append(record)
-
-    df = pd.DataFrame(records)
-    out_path = os.path.join(result_subdir, "hparam_results_BiLSTM.csv")
-    df.to_csv(out_path, index=False)
-    print(f"[BiLSTM] 全部结果已保存到 {out_path}")
-    return df
-
-def sweep_bilstm_ablation():
-    """
-    BiLSTM 消融实验：
-      - 围绕当前最优配置 seq_len=14, feature_mode="B"
-      - 只调整 hidden_dim 和 lr 做小范围精修
-      - 结果保存到 results/BiLSTM_ablation/hparam_results_BiLSTM_ablation.csv
-    """
-    subdir = "BiLSTM_ablation"
-    result_subdir = os.path.join(RESULT_DIR, subdir)
-    os.makedirs(result_subdir, exist_ok=True)
-
-    # 固定在当前最优附近：seq_len=14, feature_mode="B"
-    seq_len_list = [14]
-
-    # 更小的隐藏维度；64 作为对照
-    hidden_list = [16, 32, 48, 64]
-
-    # 比原来更小的学习率；5e-4 作为对照
-    lr_list = [5e-4, 2e-4, 1e-4]
-
-    # 只在 B 模式做消融（文本 + 静态特征）
-    feature_mode_list = ["B"]
-
-    records = []
-
-    for seq_len, hidden_dim, lr, feature_mode in product(
-        seq_len_list, hidden_list, lr_list, feature_mode_list
-    ):
-        print("\n================ BiLSTM ABLATION CONFIG ================")
-        print(f"seq_len={seq_len}, hidden_dim={hidden_dim}, lr={lr}, feature_mode={feature_mode}")
-
-        # 和之前完全一样的准备流程
-        info, dataset, loaders = prepare_datasets(
-            seq_len=seq_len,
-            feature_mode=feature_mode,
-            save_npz=False,
-        )
-        train_loader, val_loader, test_loader = loaders
-
-        vocab_size = info["vocab_size"]
-        num_numeric_features = info["num_numeric_features"]
-        thresholds = info["difficulty_thresholds"]
-
-        model = BiLSTMAttentionModel(
-            vocab_size=vocab_size,
-            num_numeric_features=num_numeric_features,
-            word_emb_dim=WORD_EMB_DIM,
-            hidden_dim=hidden_dim,
-        )
-
-        # 单独起一个名字，避免和原 sweep 混淆
-        model_name = f"BiLSTM_ablation_seq{seq_len}_h{hidden_dim}_lr{lr}_feat{feature_mode}"
-
-        best_val_loss, test_metrics = train_one_model(
-            model,
-            train_loader,
-            val_loader,
-            test_loader,
-            model_name=model_name,
-            lr=lr,
-            thresholds=thresholds,
-            result_subdir=subdir,   # 注意这里用的是子目录名
-            return_val=True,
-        )
-
-        record = {
-            "model": "BiLSTM",
-            "seq_len": seq_len,
-            "hidden_dim": hidden_dim,
-            "lr": lr,
-            "feature_mode": feature_mode,
-            "best_val_loss": best_val_loss,
-        }
-        record.update({f"test_{k}": v for k, v in test_metrics.items()})
-        records.append(record)
-
-    df = pd.DataFrame(records)
-    out_path = os.path.join(result_subdir, "hparam_results_BiLSTM_ablation.csv")
-    df.to_csv(out_path, index=False)
-    print(f"[BiLSTM ablation] 全部结果已保存到 {out_path}")
-    return df
-
-
-def sweep_transformer():
-    """
-    Transformer 时间序列模型的超参数搜索：
-      - seq_len
-      - d_model（这里用 GRID_HIDDEN）
-      - lr
-      - feature_mode ("A","B","C")
-    结果保存到 results/Transformer/hparam_results_Transformer.csv
-    """
-    subdir = "Transformer"
-    result_subdir = os.path.join(RESULT_DIR, subdir)
-    os.makedirs(result_subdir, exist_ok=True)
-
-    # 统一的搜索空间
-    seq_len_list = GRID_SEQ_LEN
-    hidden_list = GRID_HIDDEN        # 这里对应 Transformer 的 d_model
-    lr_list = GRID_LR
-    feature_mode_list = GRID_FEATURE_MODE
-
-    records = []
-
-    for seq_len, hidden_dim, lr, feature_mode in product(
-        seq_len_list, hidden_list, lr_list, feature_mode_list
-    ):
-        print("\n================ Transformer CONFIG ================")
-        print(f"seq_len={seq_len}, d_model={hidden_dim}, lr={lr}, feature_mode={feature_mode}")
-
-        info, dataset, loaders = prepare_datasets(
-            seq_len=seq_len,
-            feature_mode=feature_mode,
-            save_npz=False,
-        )
-        train_loader, val_loader, test_loader = loaders
-
-        vocab_size = info["vocab_size"]
-        num_numeric_features = info["num_numeric_features"]
-        thresholds = info["difficulty_thresholds"]
-
-        model = TransformerTimeModel(
-            vocab_size=vocab_size,
-            num_numeric_features=num_numeric_features,
-            d_model=hidden_dim,  # 关键：把统一的 hidden_dim 当做 d_model
-        )
-
-        model_name = f"Trans_seq{seq_len}_d{hidden_dim}_lr{lr}_feat{feature_mode}"
-        best_val_loss, test_metrics = train_one_model(
-            model,
-            train_loader,
-            val_loader,
-            test_loader,
-            model_name=model_name,
-            lr=lr,
-            thresholds=thresholds,
-            result_subdir=subdir,
-            return_val=True,
-        )
-
-        record = {
-            "model": "Transformer",
-            "seq_len": seq_len,
-            "hidden_dim": hidden_dim,  # 这里其实就是 d_model
-            "lr": lr,
-            "feature_mode": feature_mode,
-            "best_val_loss": best_val_loss,
-        }
-        record.update({f"test_{k}": v for k, v in test_metrics.items()})
-        records.append(record)
-
-    df = pd.DataFrame(records)
-    out_path = os.path.join(result_subdir, "hparam_results_Transformer.csv")
-    df.to_csv(out_path, index=False)
-    print(f"[Transformer] 全部结果已保存到 {out_path}")
-    return df
-
+# ==================== 主程序 ====================
 
 if __name__ == "__main__":
-    torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
+    # 第一步：计算并打印 Baseline
+    # 先随便初始化一个 dataset 获取 loader
+    print("正在计算全局均值基准 (Baseline)...")
+    info, _, (tr, _, ts) = prepare_datasets(seq_len=14, feature_mode="A")
+    baseline = get_global_mean_baseline(tr, ts)
+    print(f"Baseline 指标: L1={baseline['baseline_l1']:.4f}, MAE={baseline['baseline_mae']:.4f}")
+    
+    # 将 Baseline 写入一个小文件，方便你在论文里引用
+    with open(os.path.join(RESULT_DIR, "baseline.txt"), "w") as f:
+        f.write(str(baseline))
 
-    print("==== Sweep LSTM ====")
-    sweep_lstm()
-
-    print("\n==== Sweep BiLSTM ====")
-    sweep_bilstm()
-
-    print("\n==== Sweep Transformer ====")
-    sweep_transformer()
-    print("\n==== Sweep BiLSTM Ablation ====")
-    sweep_bilstm_ablation()
-
-
-
-
+    # 第二步：依次跑三个模型
+    for m in ["LSTM", "BiLSTM", "Transformer"]:
+        run_sweep(model_type=m)
+        
+    print("\n[完成] 所有实验已结束，结果保存在 results/ 目录下。")
     
 
