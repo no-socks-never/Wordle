@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wordle 游戏难度的深度学习预测与因果探究</title>
+    <link href="https://fonts.googleapis.com/css2?family=VT323&family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --win-gray: #c0c0c0;
+            --win-light: #ffffff;
+            --win-shadow: #555555;
+            --win-dark: #000000;
+            --neon-pink: #ff00ff;
+            --neon-blue: #00f0ff;
+            --acid-green: #ccff00;
+            --chrome-grad: linear-gradient(135deg, #e0e0e0 0%, #ffffff 45%, #999 50%, #e0e0e0 55%, #c0c0c0 100%);
+            --header-grad: linear-gradient(90deg, #000080, #1084d0, #000080);
+        }
+
+        * { box-sizing: border-box; cursor: url('https://cur.cursors-4u.net/games/gam-13/gam1282.cur'), auto; }
+
+        body {
+            margin: 0; padding: 0; background-color: #050505;
+            background-image: 
+                linear-gradient(rgba(0, 240, 255, 0.1) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 0, 255, 0.1) 1px, transparent 1px);
+            background-size: 40px 40px;
+            height: 100vh; overflow: hidden; font-family: 'VT323', monospace;
+            color: black;
+        }
+
+        .crt-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%), 
+                        linear-gradient(90deg, rgba(255,0,0,0.03), rgba(0,255,0,0.01), rgba(0,0,255,0.03));
+            background-size: 100% 3px, 3px 100%; pointer-events: none; z-index: 9999;
+        }
+
+        /* ICONS */
+        .desktop-icons {
+            position: absolute; top: 20px; left: 20px; display: flex; flex-direction: column; gap: 30px; z-index: 0;
+        }
+        .icon {
+            width: 90px; text-align: center; color: white; 
+            text-shadow: 2px 2px #000; font-family: 'Press Start 2P'; font-size: 9px; cursor: pointer;
+        }
+        .icon img {
+            width: 48px; height: 48px; margin-bottom: 8px; image-rendering: pixelated;
+            filter: drop-shadow(4px 4px 0px rgba(0,0,0,0.5)); transition: transform 0.1s;
+        }
+        .icon:hover img { transform: translateY(-2px); filter: drop-shadow(4px 4px 0px var(--neon-pink)); }
+
+        /* WINDOWS - GLOBAL RESIZE ENABLED */
+        .window {
+            position: absolute; background: var(--win-gray);
+            border-top: 2px solid var(--win-light); border-left: 2px solid var(--win-light);
+            border-right: 2px solid var(--win-dark); border-bottom: 2px solid var(--win-dark);
+            box-shadow: 10px 10px 0px rgba(0,0,0,0.5); 
+            display: flex; flex-direction: column;
+            resize: both; overflow: auto; /* ALLOW SCROLL IF CONTENT OVERFLOWS */
+            min-width: 250px; min-height: 200px;
+        }
+        .window.hidden { display: none; }
+
+        .title-bar {
+            background: var(--header-grad); padding: 4px 6px; display: flex; justify-content: space-between; 
+            align-items: center; color: white; font-family: 'Press Start 2P'; font-size: 10px; 
+            cursor: grab; flex-shrink: 0; user-select: none; height: 32px;
+        }
+        .title-bar.active { background: linear-gradient(90deg, var(--neon-pink), var(--neon-blue)); }
+        
+        .title-btn {
+            background: var(--win-gray); border: 1px outset #fff; width: 18px; height: 18px;
+            font-size: 12px; line-height: 14px; text-align: center; cursor: pointer; color: black; margin-left: 2px;
+        }
+        .title-btn:active { border: 1px inset #fff; }
+
+        .window-body {
+            padding: 10px; font-size: 16px; position: relative; flex-grow: 1; display: flex; flex-direction: column;
+            background: var(--win-gray);
+        }
+
+        /* UI COMPONENTS */
+        .inset-panel { background: white; border: 2px inset #888; padding: 10px; margin-bottom: 10px; }
+        .dark-terminal {
+            background: #000; color: var(--acid-green); border: 2px inset #fff; 
+            padding: 10px; font-family: 'VT323'; overflow-y: auto; text-shadow: 0 0 5px var(--acid-green);
+        }
+        
+        button.retro-btn {
+            background: var(--chrome-grad); border: 2px outset #fff; padding: 8px; 
+            font-family: 'Press Start 2P'; font-size: 10px; cursor: pointer; margin-top: 5px; width: 100%;
+            text-transform: uppercase; color: #000;
+        }
+        button.retro-btn:active { border: 2px inset #fff; transform: translateY(1px); }
+
+        select.retro-select {
+            width: 100%; background: #000080; color: white; border: 2px inset white; 
+            padding: 8px; font-family: 'VT323'; font-size: 18px; margin-bottom: 10px;
+        }
+
+        /* TOOLTIP */
+        #tooltip {
+            position: absolute; display: none; background: rgba(0, 0, 0, 0.9);
+            border: 1px solid var(--neon-pink); color: #fff; padding: 5px 10px;
+            font-family: 'VT323'; font-size: 16px; z-index: 10000; pointer-events: none;
+            box-shadow: 0 0 10px var(--neon-pink);
+        }
+
+        /* CHARTS */
+        .chart-container {
+            display: flex; align-items: flex-end; height: 100%; width: 100%; 
+            gap: 8px; 
+            padding-top: 15px; min-height: 150px;
+            border-bottom: 2px solid #555;
+            position: relative;
+        }
+        .bar { 
+            flex: 1; background: linear-gradient(to top, var(--neon-blue), #fff); 
+            position: relative; transition: height 0.3s ease; border: 1px solid #000;
+        }
+        .bar:hover {
+            filter: brightness(1.2);
+            border: 1px solid var(--acid-green);
+        }
+        .bar-label {
+            position: absolute; bottom: -25px; left: 50%; transform: translateX(-50%);
+            font-size: 16px; 
+            font-weight: bold; color: #000; font-family: 'VT323';
+        }
+
+        /* ABLATION CHART BARS */
+        .ablation-bar-group { display: flex; flex-direction: column; width: 100%; margin-bottom: 12px; }
+        .ablation-bar-bg { width: 100%; background: #333; height: 24px; border: 1px inset white; position: relative; }
+        .ablation-bar-fill { height: 100%; background: linear-gradient(90deg, var(--acid-green), #fff); transition: width 0.5s ease; }
+        .ablation-label { font-size: 16px; margin-bottom: 4px; display: flex; justify-content: space-between; font-family: 'VT323'; font-weight: bold;}
+
+        /* WORDLE GAME STYLES (FIXED SCROLL) */
+        #win-wordle .window-body {
+            /* Changed from hidden to auto to allow scrolling if user resizes small */
+            overflow-y: auto; 
+            display: flex; flex-direction: column; justify-content: flex-start;
+        }
+        .wordle-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 4px; }
+        .wordle-cell {
+            width: 100%; aspect-ratio: 1; background: #000; border: 2px inset #444;
+            display: flex; justify-content: center; align-items: center;
+            font-family: 'Press Start 2P'; font-size: 16px; color: white; text-transform: uppercase;
+        }
+        .wordle-cell.correct { background: #00aa00; border-color: #00aa00; } 
+        .wordle-cell.present { background: #aaaa00; border-color: #aaaa00; } 
+        .wordle-cell.absent { background: #333; border-color: #333; } 
+        
+        #wordle-ui-container {
+            display: flex; flex-direction: column; gap: 8px; margin-top: 10px;
+        }
+
+        /* TASKBAR */
+        .taskbar {
+            position: fixed; bottom: 0; width: 100%; height: 35px; background: var(--win-gray); 
+            border-top: 2px solid #fff; display: flex; align-items: center; padding: 2px; z-index: 99999;
+        }
+        .start-btn { 
+            display: flex; align-items: center; gap: 6px; padding: 2px 8px; height: 28px;
+            background: var(--win-gray); border: 2px outset #fff; font-family: 'Press Start 2P'; font-size: 10px; font-weight: bold;
+        }
+        .clock-tray {
+            margin-left: auto; border: 2px inset #fff; background: #ddd; 
+            padding: 0 10px; height: 28px; display: flex; align-items: center; 
+            font-family: 'VT323'; font-size: 18px; font-weight: bold;
+        }
+
+        .help-tip { font-size: 12px; color: #555; margin-bottom: 5px; font-family: sans-serif; font-weight: bold; }
+
+    </style>
+</head>
+<body>
+    <div class="crt-overlay"></div>
+    <div id="tooltip"></div>
+
+    <div class="desktop-icons">
+        <div class="icon" onclick="openWindow('win-users')">
+            <img src="https://win98icons.alexmeub.com/icons/png/computer_explorer-5.png">
+            <div>AUTHORS</div>
+        </div>
+        <div class="icon" onclick="openWindow('win-tech')">
+            <img src="https://win98icons.alexmeub.com/icons/png/network_internet_pcs_installer-2.png">
+            <div>TECH_FLOW</div>
+        </div>
+        <div class="icon" onclick="openWindow('win-ablation')">
+            <img src="https://win98icons.alexmeub.com/icons/png/directory_open_file_mydocs-4.png">
+            <div>ABLATION_CHART</div>
+        </div>
+        <div class="icon" onclick="openWindow('win-wordle')">
+            <img src="https://win98icons.alexmeub.com/icons/png/recycle_bin_full-4.png">
+            <div>WORDLE</div>
+        </div>
+    </div>
+
+    <div class="window" id="win-control" style="top: 40px; left: 40px; width: 340px; height: 500px; z-index: 10;">
+        <div class="title-bar active">
+            <span>HYPER_PARAMS.EXE</span>
+            <div style="display:flex"><div class="title-btn" onclick="closeWindow('win-control')">X</div></div>
+        </div>
+        <div class="window-body">
+            <label style="font-size:14px; font-weight:bold;">MODEL ARCHITECTURE</label>
+            <select id="model-select" class="retro-select" onchange="runSimulation()">
+                <option value="Transformer">Transformer (Lightweight)</option>
+                <option value="LSTM">LSTM (Standard)</option>
+                <option value="BiLSTM">BiLSTM (Bidirectional)</option>
+            </select>
+
+            <label style="font-size:14px; font-weight:bold;">FEATURE MODE</label>
+            <div class="help-tip">Which features to include?</div>
+            <select id="mode-select" class="retro-select" onchange="runSimulation()">
+                <option value="B">Mode B: Static + Ling (Best)</option>
+                <option value="A">Mode A: Char Embed Only</option>
+                <option value="C">Mode C: Mode B + Env Noise</option>
+            </select>
+
+            <label style="font-size:14px; font-weight:bold;">HISTORY WINDOW (T)</label>
+            <div class="help-tip">Days of history used (Seq Len)</div>
+            <select id="seq-select" class="retro-select" onchange="runSimulation()">
+                <option value="0">T=0 (Independence Hypo)</option>
+                <option value="10">T=10 Days</option>
+                <option value="14">T=14 Days</option>
+            </select>
+
+            <div class="inset-panel" style="background:#000; color:#0f0; font-family:'VT323'; height:80px; font-size:16px;">
+                > READY FOR INFERENCE<br>
+                > SYSTEM CHECK: OK
+            </div>
+            <button class="retro-btn" onclick="runSimulation()">>> RE-CALIBRATE SYSTEM</button>
+        </div>
+    </div>
+
+    <div class="window" id="win-dashboard" style="top: 40px; left: 400px; width: 650px; height: 550px; z-index: 9;">
+        <div class="title-bar">
+            <span style="font-size: 10px;">PREDICTION MODEL.EXE</span>
+            <div style="display:flex"><div class="title-btn" onclick="closeWindow('win-dashboard')">X</div></div>
+        </div>
+        <div class="window-body" style="background: #e0e0e0;">
+            <div class="inset-panel" style="display: flex; gap: 20px; background: #fff;">
+                <div style="flex: 1;">
+                    <div style="font-size: 14px; color: #666; font-weight:bold;">TEST MAE (LOWER IS BETTER)</div>
+                    <div id="mae-display" style="font-size: 36px; font-family:'VT323'; color:#000080; font-weight: bold;">0.0000</div>
+                </div>
+                <div style="flex: 1;">
+                    <div style="font-size: 14px; color: #666; font-weight:bold;">EMD SCORE (DISTRIBUTION FIT)</div>
+                    <div id="emd-display" style="font-size: 36px; font-family:'VT323'; color:#000080; font-weight: bold;">0.0000</div>
+                </div>
+            </div>
+
+            <div class="inset-panel" style="flex-grow: 1; background: #222; border: 3px inset #fff; display: flex; flex-direction: column;">
+                <div style="color: var(--acid-green); font-size: 18px; margin-bottom: 10px; font-family:'VT323'; display:flex; justify-content:space-between;">
+                    <span>>> PREDICTED DISTRIBUTION (P_t)</span>
+                </div>
+                <div style="font-size: 12px; color: #aaa; margin-bottom: 5px; font-family: sans-serif;">
+                    Y-Axis: Probability (%) | X-Axis: Number of Tries (1-6) or Fail (X)
+                </div>
+                <div class="chart-container" id="dist-chart">
+                    </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="window" id="win-log" style="top: 600px; left: 400px; width: 650px; height: 200px; z-index: 8;">
+        <div class="title-bar" style="background: linear-gradient(90deg, #800000, #ff0000);">
+            <span>SYSTEM_LOG</span>
+            <div style="display:flex"><div class="title-btn" onclick="closeWindow('win-log')">X</div></div>
+        </div>
+        <div class="window-body" style="padding: 0;">
+            <div class="dark-terminal" id="console-log" style="height: 100%; border: none; font-size: 16px;">
+                > SYSTEM BOOT SEQUENCE... OK<br>
+                > LOADING MCM_PROBLEM_C_DATA... OK<br>
+            </div>
+        </div>
+    </div>
+
+    <div class="window hidden" id="win-users" style="top: 150px; left: 200px; width: 350px; height: 200px; z-index: 20;">
+        <div class="title-bar"><span>AUTHORS_PROFILE.TXT</span><div class="title-btn" onclick="closeWindow('win-users')">X</div></div>
+        <div class="window-body">
+            <div class="inset-panel" style="height:100%; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family:'Press Start 2P'; font-size:12px; line-height:1.5;">
+                <div style="color:#000080;">USER:</div>
+                <div style="margin-top:10px;">吕馨悦 231820003</div>
+                <div>邱怡玮 231820016</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="window hidden" id="win-tech" style="top: 100px; left: 150px; width: 450px; height: 400px; z-index: 21;">
+        <div class="title-bar"><span>TECHNICAL_ROADMAP.TXT</span><div class="title-btn" onclick="closeWindow('win-tech')">X</div></div>
+        <div class="window-body" style="background:#000;">
+            <div class="dark-terminal" style="height:100%; font-size:14px; line-height:1.2;">
+<pre>
+[ DATA ACQUISITION ]
+       |
+       v
+[ PREPROCESSING FUNNEL ]
+(Filter Anomalies, Interpolation)
+       |
+       v
+[ FEATURE ENGINEERING ]
++--------------------------+
+| Mode A: Char Embedding   |
+| Mode B: Static Ling.     |
+| Mode C: Dynamic Env.     |
++--------------------------+
+       |
+       v
+[ MODEL ARCHITECTURE ]
+   LSTM / BiLSTM / Transformer
+       |
+       v
+[ OUTPUT: 7D PROB VECTOR ]
+   (Seq-to-Distribution)
+</pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="window hidden" id="win-ablation" style="top: 120px; left: 300px; width: 500px; height: 450px; z-index: 22;">
+        <div class="title-bar"><span>ABLATION_STUDY_VISUALIZER.EXE</span><div class="title-btn" onclick="closeWindow('win-ablation')">X</div></div>
+        <div class="window-body">
+            <div style="font-size:16px; margin-bottom:10px; font-weight:bold;">
+                <strong>Study 1: Sequence Length Impact (T)</strong><br>
+                <span style="color:#666; font-size:14px;">Does history help? (Lower MAE is better)</span>
+            </div>
+            <div class="inset-panel" id="ablation-seq-chart">
+                </div>
+
+            <div style="font-size:16px; margin-bottom:10px; margin-top:15px; font-weight:bold;">
+                <strong>Study 2: Feature Mode Impact</strong><br>
+                <span style="color:#666; font-size:14px;">Which features matter?</span>
+            </div>
+            <div class="inset-panel" id="ablation-mode-chart">
+                </div>
+        </div>
+    </div>
+
+    <div class="window hidden" id="win-wordle" style="top: 100px; left: 350px; width: 350px; height: 500px; z-index: 23;">
+        <div class="title-bar" style="background:#00aa00;"><span>PLAY_WORDLE.EXE</span><div class="title-btn" onclick="closeWindow('win-wordle')">X</div></div>
+        <div class="window-body" style="background:#222; text-align:center;">
+            <div style="color:white; margin-bottom:10px; font-family:'Press Start 2P'; font-size:10px;">GUESS THE WORD (5 LETTERS)</div>
+            
+            <div id="wordle-board">
+                </div>
+
+            <div id="wordle-ui-container">
+                <input type="text" id="wordle-input" maxlength="5" style="width:100%; text-transform:uppercase; font-family:'Press Start 2P'; text-align:center; padding:10px; font-size:14px;" placeholder="TYPE HERE">
+                
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div id="wordle-msg" style="color:#aaa; font-size:14px; text-align:left; width: 60%; line-height: 1.2;">Game Ready.<br>Good Luck!</div>
+                    <button class="retro-btn" style="background:#00aa00; color:white; width: 35%; margin-top:0;" onclick="resetGame()">RESET</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="taskbar">
+        <button class="start-btn">
+            <img src="https://win98icons.alexmeub.com/icons/png/windows-0.png" height="18">
+            START
+        </button>
+        <div style="border-left: 2px solid #888; height: 26px; margin: 0 8px;"></div>
+        <div class="inset-panel" style="margin: 0; padding: 2px 8px; background: #ccc; border: 2px inset #fff; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 300px;">
+            Deep Learning Prediction of Wordle Difficulty
+        </div>
+        <div class="clock-tray" id="real-clock">00:00:00</div>
+    </div>
+
+    <script>
+        // --- 1. CLOCK (24H Format) ---
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('real-clock').innerText = now.toLocaleTimeString('en-GB');
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // --- 2. WINDOW MANAGEMENT ---
+        function openWindow(id) {
+            const win = document.getElementById(id);
+            win.classList.remove('hidden');
+            bringToFront(win);
+            if(id === 'win-ablation') renderAblationChart();
+            // Reset scroll position
+            win.scrollTop = 0;
+        }
+        function closeWindow(id) {
+            document.getElementById(id).classList.add('hidden');
+        }
+        
+        let zIndex = 100;
+        function bringToFront(win) {
+            zIndex++;
+            win.style.zIndex = zIndex;
+            document.querySelectorAll('.title-bar').forEach(b => b.classList.remove('active'));
+            win.querySelector('.title-bar').classList.add('active');
+        }
+
+        // TOOLTIP LOGIC
+        const tooltip = document.getElementById('tooltip');
+        function showTooltip(e, text) {
+            tooltip.style.display = 'block';
+            tooltip.innerHTML = text;
+            moveTooltip(e);
+        }
+        function moveTooltip(e) {
+            tooltip.style.left = e.pageX + 10 + 'px';
+            tooltip.style.top = e.pageY + 10 + 'px';
+        }
+        function hideTooltip() {
+            tooltip.style.display = 'none';
+        }
+
+        // DRAG LOGIC
+        document.querySelectorAll('.title-bar').forEach(bar => {
+            bar.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('title-btn')) return;
+                const win = bar.parentElement;
+                bringToFront(win);
+
+                const shiftX = e.clientX - win.getBoundingClientRect().left;
+                const shiftY = e.clientY - win.getBoundingClientRect().top;
+
+                function moveAt(pageX, pageY) {
+                    win.style.left = pageX - shiftX + 'px';
+                    win.style.top = pageY - shiftY + 'px';
+                }
+
+                function onMouseMove(event) {
+                    moveAt(event.pageX, event.pageY);
+                }
+
+                document.addEventListener('mousemove', onMouseMove);
+                bar.onmouseup = function() {
+                    document.removeEventListener('mousemove', onMouseMove);
+                    bar.onmouseup = null;
+                };
+            });
+            bar.parentElement.addEventListener('mousedown', () => bringToFront(bar.parentElement));
+        });
+
+        // --- 3. MAIN SIMULATION LOGIC ---
+        function runSimulation() {
+            const model = document.getElementById('model-select').value;
+            const mode = document.getElementById('mode-select').value;
+            const seq = document.getElementById('seq-select').value;
+
+            // --- DATA LOGIC ---
+            let mae = 0.2411;
+            let emd = 0.2650;
+            let logs = [];
+
+            if (model === 'Transformer') {
+                logs.push("> Model: Transformer (Attention Mechanism)");
+            } else if (model === 'LSTM') {
+                mae += 0.020; emd += 0.040;
+                logs.push("> Model: LSTM (Recurrent limitation)");
+            } else { 
+                mae += 0.025; emd += 0.030;
+                logs.push("> Model: BiLSTM (Bidirectional)");
+            }
+
+            if (mode === 'B') {
+                logs.push("> Features: Mode B (Linguistic Priors) [OPTIMAL]");
+            } else if (mode === 'A') {
+                mae += 0.05; emd += 0.05;
+                logs.push("> Features: Mode A (Char Embed Only) -> Underfitting");
+            } else { 
+                mae += 0.04; emd += 0.04;
+                logs.push("> Features: Mode C (Env Noise) -> Overfitting");
+            }
+
+            if (seq === '0') {
+                logs.push("> History: T=0 Days (Independent) [OPTIMAL]");
+            } else if (seq === '10') {
+                mae += 0.03;
+                logs.push("> History: T=10 Days -> Noise Introduced");
+            } else {
+                mae += 0.04;
+                logs.push("> History: T=14 Days -> High Noise");
+            }
+
+            document.getElementById('mae-display').innerText = mae.toFixed(4);
+            document.getElementById('emd-display').innerText = emd.toFixed(4);
+
+            const logTerm = document.getElementById('console-log');
+            logTerm.innerHTML += "<br>------------------<br>";
+            logs.forEach(l => logTerm.innerHTML += l + "<br>");
+            logTerm.scrollTop = logTerm.scrollHeight;
+
+            // DRAW CHART
+            const chartDiv = document.getElementById('dist-chart');
+            chartDiv.innerHTML = '';
+            
+            let baseDist = [0, 5, 25, 40, 20, 8, 2]; 
+            const errorFactor = (mae - 0.24) * 10; 
+            
+            let noisyDist = baseDist.map((val, idx) => {
+                if ([2,3,4].includes(idx)) return val - (errorFactor * 5);
+                return val + (errorFactor * 3);
+            });
+
+            const minVal = Math.min(...noisyDist);
+            if (minVal < 0) noisyDist = noisyDist.map(v => v + Math.abs(minVal) + 1); 
+            const total = noisyDist.reduce((a,b) => a+b, 0);
+            const normDist = noisyDist.map(v => (v/total) * 100);
+
+            const labels = ['1', '2', '3', '4', '5', '6', 'X'];
+            
+            normDist.forEach((val, idx) => {
+                const bar = document.createElement('div');
+                bar.className = 'bar';
+                setTimeout(() => { bar.style.height = `${val}%`; }, 10); 
+                
+                if (idx === 3) bar.style.background = `linear-gradient(to top, var(--acid-green), #fff)`; 
+                if (idx === 6) bar.style.background = `linear-gradient(to top, #ff0000, #550000)`; 
+                
+                // Tooltip Events
+                bar.addEventListener('mousemove', (e) => showTooltip(e, `Tries: ${labels[idx]}<br>Prob: ${val.toFixed(1)}%`));
+                bar.addEventListener('mouseout', hideTooltip);
+
+                const lbl = document.createElement('div');
+                lbl.className = 'bar-label';
+                lbl.innerText = labels[idx];
+                bar.appendChild(lbl);
+                chartDiv.appendChild(bar);
+            });
+        }
+
+        // --- 4. ABLATION CHART RENDERER ---
+        function renderAblationChart() {
+            const seqData = [
+                { label: 'T=0 (Best)', val: 0.241, color: '#00aa00' },
+                { label: 'T=10', val: 0.298, color: '#aaaa00' },
+                { label: 'T=14', val: 0.309, color: '#aa0000' }
+            ];
+            const modeData = [
+                { label: 'Mode A (Char)', val: 0.267, color: '#aaaa00' },
+                { label: 'Mode B (Ling)', val: 0.241, color: '#00aa00' },
+                { label: 'Mode C (Env)', val: 0.283, color: '#aa0000' }
+            ];
+
+            function drawBars(containerId, data) {
+                const container = document.getElementById(containerId);
+                container.innerHTML = '';
+                const maxVal = 0.35;
+                
+                data.forEach(d => {
+                    const group = document.createElement('div');
+                    group.className = 'ablation-bar-group';
+                    
+                    const label = document.createElement('div');
+                    label.className = 'ablation-label';
+                    label.innerHTML = `<span>${d.label}</span> <span>MAE: ${d.val}</span>`;
+                    
+                    const bg = document.createElement('div');
+                    bg.className = 'ablation-bar-bg';
+                    
+                    const fill = document.createElement('div');
+                    fill.className = 'ablation-bar-fill';
+                    fill.style.background = d.color;
+                    fill.style.width = `${(d.val / maxVal) * 100}%`;
+                    
+                    // Add Tooltip to Ablation bars too
+                    bg.addEventListener('mousemove', (e) => showTooltip(e, `Config: ${d.label}<br>Error: ${d.val}`));
+                    bg.addEventListener('mouseout', hideTooltip);
+
+                    bg.appendChild(fill);
+                    group.appendChild(label);
+                    group.appendChild(bg);
+                    container.appendChild(group);
+                });
+            }
+
+            drawBars('ablation-seq-chart', seqData);
+            drawBars('ablation-mode-chart', modeData);
+        }
+
+        // --- 5. WORDLE GAME LOGIC ---
+        const wordList = ['FOCUS', 'CRANE', 'AUDIO', 'TRACE', 'ROBOT', 'CHART', 'MODEL', 'ACIDD'];
+        let targetWord = "FOCUS";
+        let attempts = 0;
+        const maxAttempts = 6;
+        let gameOver = false;
+
+        function resetGame() {
+            targetWord = wordList[Math.floor(Math.random() * wordList.length)];
+            attempts = 0;
+            gameOver = false;
+            document.getElementById('wordle-msg').innerText = "Game Ready.\nGood Luck!";
+            document.getElementById('wordle-input').value = "";
+            document.getElementById('wordle-input').disabled = false;
+            
+            const board = document.getElementById('wordle-board');
+            board.innerHTML = '';
+            for(let i=0; i<maxAttempts; i++) {
+                const row = document.createElement('div');
+                row.className = 'wordle-grid';
+                for(let j=0; j<5; j++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'wordle-cell';
+                    cell.id = `cell-${i}-${j}`;
+                    row.appendChild(cell);
+                }
+                board.appendChild(row);
+            }
+        }
+
+        document.getElementById('wordle-input').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter' && !gameOver) {
+                const guess = this.value.toUpperCase();
+                if (guess.length !== 5) {
+                    document.getElementById('wordle-msg').innerText = "Must be 5 letters!";
+                    return;
+                }
+                
+                let correctCount = 0;
+                for (let i = 0; i < 5; i++) {
+                    const cell = document.getElementById(`cell-${attempts}-${i}`);
+                    cell.innerText = guess[i];
+                    
+                    if (guess[i] === targetWord[i]) {
+                        cell.classList.add('correct');
+                        correctCount++;
+                    } else if (targetWord.includes(guess[i])) {
+                        cell.classList.add('present');
+                    } else {
+                        cell.classList.add('absent');
+                    }
+                }
+                attempts++;
+                this.value = '';
+                
+                if(correctCount === 5) {
+                    document.getElementById('wordle-msg').innerText = "VICTORY! Word: " + targetWord;
+                    gameOver = true;
+                } else if (attempts >= maxAttempts) {
+                    document.getElementById('wordle-msg').innerText = "FAIL. Word: " + targetWord;
+                    gameOver = true;
+                }
+            }
+        });
+
+        // Initialize
+        runSimulation();
+        resetGame();
+
+    </script>
+</body>
+</html>
